@@ -1,0 +1,139 @@
+#include "stdafx.h"
+#pragma warning (disable : 4996)
+#include <stdio.h>
+#include "iurcontrol.h"
+
+IURControl* pConnect[2];
+HINSTANCE hDLL[2];
+
+BOOL b_ur_connected[2] = { FALSE, FALSE };
+BOOL b_ur_control[2] = { FALSE, FALSE };
+BOOL b_save_data = FALSE;
+FILE *fp1;
+
+extern unsigned long ms_cnt;
+typedef struct T_UR_CONTROL_DATA
+{
+	double ref_j[6];	//desired joint angle deg
+	double act_j[6];	//act joint angle deg
+	double j_err[6];	//joint angle error deg
+	double pre_j_err[6];	//previous joint angle error deg
+	double cmd_jv[6];	//command velocity
+}UR_CONTROL_DATA;
+
+UR_CONTROL_DATA ur_control_data[2];
+
+BOOL Open_UR5_Connection(int id)//id is arm id, only one arm for now
+{
+	typedef IURControl* (*lFUNC)(const char*, int);
+	lFUNC lpfunc;
+	hDLL[id] = LoadLibrary(_T("CURControl.dll"));
+	int i = GetLastError();
+	if (hDLL[id] != NULL)
+	{
+		lpfunc = (lFUNC)GetProcAddress(hDLL[id], ("getInstance"));//获取导出函数实例指针
+		if (!lpfunc)
+		{
+			// handle the error
+			FreeLibrary(hDLL[id]);
+			b_ur_connected[id] = FALSE;
+		}
+		else
+		{
+			// call the function
+			if (id == 0)
+				pConnect[id] = lpfunc("10.0.6.62", 50007);
+			else if (id == 1)
+				pConnect[id] = lpfunc("10.0.6.61", 50008);
+			//pConnect[id] = lpfunc("192.168.0.5");
+			if (!pConnect[id] || !pConnect[id]->isConnected())
+				b_ur_connected[id] = FALSE;
+			else
+				b_ur_connected[id] = TRUE;
+		}
+	}
+	else
+		b_ur_connected[id] = FALSE;
+	return b_ur_connected[id];
+}
+void Close_UR5_Connection(int id)
+{
+	//pConnect[id]->Stop(); //停止机器人运动
+	//pConnect[id]->Destroy();//销毁实例*/
+	//FreeLibrary(hDLL[id]);//not working, crash
+}
+
+int UR5_get_actual_joint_angle(int id, double j[6])
+{
+	for (int i = 0; i < 6; i++)
+	{
+		j[i] = ur_control_data[id].act_j[i];
+	}
+	return 0;
+}
+
+int UR5_set_desired_joint_angle(int id, double ref_j[6])
+{
+	for (int i = 0; i < 6; i++)
+	{
+		ur_control_data[id].ref_j[i] = ref_j[i];
+	}
+	return 0;
+}
+
+int UR5_joint_control(int id)//this is 1ms loop
+{
+	double v_max = 1.5;
+	double kp = 0.01;	
+	double kd = 0;
+	if (ms_cnt % 24 == 0)
+	{
+		std::vector<double> vec = pConnect[id]->getQActual();
+		if(vec.size() != 6)
+			return -1;
+		for (int i = 0; i < 6; i++)
+		{
+			if (i == 0 || i == 1 || i == 2)
+			{
+				v_max = 0.3;
+				kp = 0.10;
+				kd = 0.0;
+			}
+			else
+			{
+				v_max = 1.0;
+				kp = 0.15;
+				kd = 0.0;
+			}
+			ur_control_data[id].act_j[i] = vec.at(i) * 180 / 3.14159265;
+			ur_control_data[id].j_err[i] = ur_control_data[id].ref_j[i] - ur_control_data[id].act_j[i];
+			ur_control_data[id].cmd_jv[i] = kp * ur_control_data[id].j_err[i] + kd * (ur_control_data[id].j_err[i] - ur_control_data[id].pre_j_err[i]);
+
+			if (ur_control_data[id].cmd_jv[i] > v_max)
+				ur_control_data[id].cmd_jv[i] = v_max;
+			else if (ur_control_data[id].cmd_jv[i] < -v_max)
+				ur_control_data[id].cmd_jv[i] = -v_max;
+			ur_control_data[id].pre_j_err[i] = ur_control_data[id].j_err[i];
+		}
+			//if (b_ur_control[id] == TRUE)
+			{
+				std::vector<double> vecspeed;
+				vecspeed.push_back(ur_control_data[id].cmd_jv[0]);
+				vecspeed.push_back(ur_control_data[id].cmd_jv[1]);
+				vecspeed.push_back(ur_control_data[id].cmd_jv[2]);
+				vecspeed.push_back(ur_control_data[id].cmd_jv[3]);
+				vecspeed.push_back(ur_control_data[id].cmd_jv[4]);
+				vecspeed.push_back(ur_control_data[id].cmd_jv[5]);
+
+				if (pConnect[id])
+					pConnect[id]->SpeedJ(vecspeed, 3.0, 0.024);
+			}
+			//else
+			{
+				//pConnect[id]->setSpeed(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.02);
+			}
+	}
+	return 0;
+
+}
+
