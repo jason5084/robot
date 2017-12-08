@@ -1,0 +1,1646 @@
+
+#include "stdafx.h"
+#include "shared_memory_ur5_arm.h"
+#include "../include/UDP_data.h"
+#include "../include/workmode.h"
+#include "../include/tool_type.h"
+#include "control.h"
+
+#include "math.h"
+
+extern S2M_DATA_TELEOPERATION net_udp_return_packets;
+extern M2S_COMMAND_TELEOPERATION net_udp_command_packets;
+
+extern BOOL b_ur_connected[2];
+extern int UR5_joint_control(int id);
+extern int UR5_get_actual_joint_angle(int id, double j[6]);
+extern int UR5_set_desired_joint_angle(int id, double ref_j[6]);
+
+//surgical arm
+//aubo
+/*#define DH_a2	408.0//427.0
+#define DH_a3	(784.0-408.0)//328.5
+#define DH_d0	98.0//104
+#define DH_d1	100//116.5
+#define DH_d4	100//116.5
+#define TOOL_MOUNT_DIST	110
+#define TOOL_LENGTH		400 //450 //300
+*/
+
+//ur5
+#define DH_a2	425.0//427.0
+#define DH_a3	392//328.5
+#define DH_d0	89.2//104
+#define DH_d1	109.3//116.5
+#define DH_d4	94.75//116.5
+#define TOOL_MOUNT_DIST	82.5
+#define TOOL_LENGTH		400 //450 //300
+
+double arm_6dof_dh_theta_offset[6]=
+{
+	0, PI/2, 0, -PI/2, 0, 0
+};
+double arm_dh_theta[2][6]=
+{
+	{0, 0, 0, 0, 0, 0},
+	{0, 0, 0, 0, 0, 0}
+};
+double arm_6dof_dh_d[6]=
+{
+	DH_d0, DH_d1, 0, 0, DH_d4, 0
+};
+double arm_6dof_dh_a[6]=
+{
+	0, 0, DH_a2, DH_a3, 0, 0
+};
+double arm_6dof_dh_alpha[6]=
+{
+	0, PI/2, 0, 0, -PI/2, PI/2
+};
+/*
+#define DEFAULT_J0	-105
+#define DEFAULT_J1	 -3.388
+#define DEFAULT_J2	 53.449//-90.0
+#define DEFAULT_J3	77.279	 
+#define DEFAULT_J4	 -29.153//-90
+#define DEFAULT_J5	 -30.326
+#define DEFAULT_J6	 0
+
+#define DEFAULT_RCM_POS_X	695.770
+#define DEFAULT_RCM_POS_Y	-117.408
+#define DEFAULT_RCM_POS_Z	-396.339
+
+//joint angle tip at rcm -11.615, 47.996, -73.236, 6.899, 32.881, 0
+double JointAngle_at_RCM_Right[10] =  {DEFAULT_J0, -11.615, 47.996-90, 73.236, -6.899-90, -32.881, 0, 0, 0, 0};
+double JointAngle_at_RCM_Left[10] =  {DEFAULT_J0, 11.615, -47.996-90, -73.236, 6.899-90, 32.881, 0, 0, 0, 0};
+
+*/
+#define DEFAULT_J0	-105
+#define DEFAULT_J1	 -2.996
+#define DEFAULT_J2	 (90-36.561)
+#define DEFAULT_J3	75.796	 
+#define DEFAULT_J4	 (90-117.365)
+#define DEFAULT_J5	 -31.408
+#define DEFAULT_J6	 0
+
+#define DEFAULT_RCM_POS_X	720.105
+#define DEFAULT_RCM_POS_Y	-107.370
+#define DEFAULT_RCM_POS_Z	-377.247
+
+//joint angle tip at rcm -11.615, 47.996, -73.236, 6.899, 32.881, 0
+double JointAngle_at_RCM_Right[10] = { DEFAULT_J0, -11.615, 47.996 - 90, 73.236, -6.899 - 90, -32.881, 0, 0, 0, 0 };
+double JointAngle_at_RCM_Left[10] = { DEFAULT_J0, 11.615, -47.996 - 90, -73.236, 6.899 - 90, 32.881, 0, 0, 0, 0 };
+
+double JointAngleMin_ToolArm1[10] = { -300, -175, -175, -175, (-175 - 90), -175, -350, -90, -90, 0 };
+double JointAngleMax_ToolArm1[10] = { 300, 175, 175, 175, (175 - 90), 175, 350, 90, 90, 90 };
+
+//double DefaultJointPosition_Right[10] = {-60, -3, 72, -40, 25, 32, 0, 0, 0, 0};
+//double DefaultJointPosition_Left[10] = {-60, 3, -72, 40, -25, -32, 0, 0, 0, 0};
+//double DefaultJointPosition_Right[10] = {-60, -7.7, 49, -72, -9.5, 41, 0, 0, 0, 0};
+//double DefaultJointPosition_Left[10] = {-60, 7.7, -49, 72, 9.5, -41, 0, 0, 0, 0};
+//double rcm_position[2][3] = {{522, 100, -200},{522,-100, -200}};
+double DefaultJointPosition_Right[10] = {DEFAULT_J0, DEFAULT_J1, DEFAULT_J2-90, DEFAULT_J3, DEFAULT_J4-90, DEFAULT_J5, DEFAULT_J6, 0, 0, 0};
+double DefaultJointPosition_Left[10] = {DEFAULT_J0, -DEFAULT_J1, -DEFAULT_J2-90, -DEFAULT_J3, -DEFAULT_J4-90, -DEFAULT_J5, DEFAULT_J6, 0, 0, 0};
+double rcm_position[2][3] = {{DEFAULT_RCM_POS_X, DEFAULT_RCM_POS_Y, DEFAULT_RCM_POS_Z},{DEFAULT_RCM_POS_X, -DEFAULT_RCM_POS_Y, DEFAULT_RCM_POS_Z}};
+double tool_insertion_length[2];//+inside - outside
+//double insertion_pose[2][4][4];//tool shaft pose to insert tool into trocar
+int virtualRCM_work_mode[2] = {VIRTUAL_RCM_WORK_MODE_FREE_MOTION, VIRTUAL_RCM_WORK_MODE_FREE_MOTION};
+
+double fk_transform_global_frame[2][4][4];//forward kinematics transform in global frame
+
+//here global frame is using chai3d frame y-right, z-up, x-out of screen
+//baiwei base frame x-right, z-up,y-into paper
+//#define FRAME_TRANSFORM_BAIWEIBASE_TO_GLOBAL	{{0, -1, 0, 0},{1, 0, 0, 0},{0, 0, 1, 0},{0, 0, 0, 1}}
+//#define FRAME_TRANSFORM_GLOBAL_TO_BAIWEIBASE	{{0, 1, 0, 0},{-1, 0, 0, 0},{0, 0, 1, 0},{0, 0, 0, 1}}
+//%rot z 180, then %rot x 90
+#define FRAME_TRANSFORM_RIGHT_ARM_TO_GLOBAL	{{-1, 0, 0, 0},{0, 0, 1, 0},{0, 1, 0, 0},{0, 0, 0, 1}}
+//inverse of above
+#define FRAME_TRANSFORM_GLOBAL_TO_RIGHT_ARM	{{-1, 0, 0, 0},{0, 0, 1, 0},{0, 1, 0, 0},{0, 0, 0, 1}}
+//%rot x 90
+#define FRAME_TRANSFORM_LEFT_ARM_TO_GLOBAL	{{1, 0, 0, 0},{0, 0, -1, 0},{0, 1, 0, 0},{0, 0, 0, 1}}
+#define FRAME_TRANSFORM_GLOBAL_TO_LEFT_ARM	{{1, 0, 0, 0},{0, 0, 1, 0},{0, -1, 0, 0},{0, 0, 0, 1}}
+
+
+
+
+void dh_matrix(double theta, double d, double a, double alpha, double cg[4][4])
+{
+	cg[0][0] = cos(theta);
+	cg[0][1] = -sin(theta);
+	cg[0][2] = 0;
+	cg[0][3] = a;
+	cg[1][0] = sin(theta) * cos(alpha);
+	cg[1][1] = cos(theta) * cos(alpha);
+	cg[1][2] = -sin(alpha);
+	cg[1][3] = -sin(alpha) * d;
+	cg[2][0] = sin(theta) * sin(alpha);
+	cg[2][1] = cos(theta) * sin(alpha);
+	cg[2][2] = cos(alpha);
+	cg[2][3] = cos(alpha) * d;
+	cg[3][0] = 0;
+	cg[3][1] = 0;
+	cg[3][2] = 0;
+	cg[3][3] = 1;
+}
+
+void MultiplyMatrix(double A[4][4], double B[4][4], double D[4][4])
+{
+	int r, i, j;
+	double C[4][4];
+	for (r = 0; r < 4 ; r++)
+		for (i = 0; i < 4; i++)
+		{
+			C[i][r] = 0;
+			for (j = 0; j < 4; j++)
+				C[i][r] += A[i][j] * B[j][r];
+		}
+		for(i=0;i<4;i++)
+		{
+			for(j=0;j<4;j++)
+				D[i][j] = C[i][j];
+		}
+}
+
+void RotationTransformInverse4x4(double transmtx[4][4], double inverse[4][4])
+{
+	int i;
+	double Temp[16] = {0};
+	double T[16] = {0};
+	for(int i=0;i<4;i++)
+		for(int j=0;j<4;j++)
+			T[i*4+j] = transmtx[i][j];
+	Temp[0] = T[0];
+	Temp[1] = T[4];
+	Temp[2] = T[8];
+	Temp[3] = -(T[0]*T[3] + T[4]*T[7] + T[8]*T[11]);
+	Temp[4] = T[1];
+	Temp[5] = T[5];
+	Temp[6] = T[9];
+	Temp[7] = -(T[1]*T[3] + T[5]*T[7] + T[9]*T[11]);
+	Temp[8] = T[2];
+	Temp[9] = T[6];
+	Temp[10] = T[10];
+	Temp[11] = -(T[2]*T[3] + T[6]*T[7] + T[10]*T[11]);
+	Temp[12] =  0;
+	Temp[13] =  0;
+	Temp[14] =  0;
+	Temp[15] =	1;
+	
+	for(int i=0;i<4;i++)
+		for(int j=0;j<4;j++)
+		inverse[i][j] = Temp[i*4+j];
+}
+
+void dh_inv_matrix(double theta, double d, double a, double alpha, double cg[4][4])
+{
+	double trans[4][4];
+	dh_matrix(theta, d, a, alpha, trans);
+	RotationTransformInverse4x4(trans, cg);
+}
+
+double NORM4(double a, double b, double c, double d)
+{
+    return sqrt(a * a + b * b + c * c + d * d);
+}
+
+double NORM3(double a, double b, double c)
+{
+    return sqrt(a * a + b * b + c * c);
+}
+
+void CrossProduct(double u[3], double v[3], double s[3])
+{
+	s[0] = u[1]*v[2] - u[2]*v[1];
+	s[1] = u[2]*v[0] - u[0]*v[2];
+	s[2] = u[0]*v[1] - u[1]*v[0];
+}
+
+double SIGN(double x)
+{
+     return (x >= 0.0f) ? +1.0f : -1.0f;
+}
+int quaternion_to_rotation(double qq[4], double TT[4][4])
+{
+    double qw = qq[0];
+    double qx = qq[1];
+    double qy = qq[2];
+    double qz = qq[3];
+    //double n = 1.0f/sqrt(qx*qx+qy*qy+qz*qz+qw*qw);
+    double n = 1.0f/NORM4(qx, qy, qz, qw);
+	
+    qw *= n;
+    qx *= n;
+    qy *= n;
+    qz *= n;
+    TT[0][0] = 1.0f - 2.0f*qy*qy - 2.0f*qz*qz;  TT[0][1] = 2.0f*qx*qy - 2.0f*qz*qw;         TT[0][2] = 2.0f*qx*qz + 2.0f*qy*qw; TT[0][3] = 0;
+    TT[1][0] = 2.0f*qx*qy + 2.0f*qz*qw;         TT[1][1] = 1.0f - 2.0f*qx*qx - 2.0f*qz*qz;  TT[1][2] = 2.0f*qy*qz - 2.0f*qx*qw; TT[1][3] = 0;
+    TT[2][0] = 2.0f*qx*qz - 2.0f*qy*qw;         TT[2][1] = 2.0f*qy*qz + 2.0f*qx*qw;         TT[2][2] = 1.0f - 2.0f*qx*qx - 2.0f*qy*qy; TT[2][3] = 0;
+	TT[3][0] = 0;TT[3][1] = 0;TT[3][2] = 0;TT[3][3] = 1;
+	return 1;
+}
+int rotation_to_quaternion(double TT[4][4], double qq[4])
+{
+/*      double q0 = ( TT[0][0] + TT[1][0] + TT[2][0] + 1.0f) / 4.0f;
+      double q1 = ( TT[0][0] - TT[1][0] - TT[2][0] + 1.0f) / 4.0f;
+      double q2 = (-TT[0][0] + TT[1][0] - TT[2][0] + 1.0f) / 4.0f;
+      double q3 = (-TT[0][0] - TT[1][0] + TT[2][0] + 1.0f) / 4.0f;
+      if(q0 < 0.0f) q0 = 0.0f;
+      if(q1 < 0.0f) q1 = 0.0f;
+      if(q2 < 0.0f) q2 = 0.0f;
+      if(q3 < 0.0f) q3 = 0.0f;
+      q0 = sqrt(q0);
+      q1 = sqrt(q1);
+      q2 = sqrt(q2);
+      q3 = sqrt(q3);
+      if(q0 >= q1 && q0 >= q2 && q0 >= q3) {
+          q0 *= +1.0f;
+          q1 *= SIGN(TT[1][3] - TT[1][1]);
+          q2 *= SIGN(TT[0][2] - TT[1][2]);
+          q3 *= SIGN(TT[0][3] - TT[0][1]);
+      } else if(q1 >= q0 && q1 >= q2 && q1 >= q3) {
+          q0 *= SIGN(TT[1][3] - TT[1][1]);
+          q1 *= +1.0f;
+          q2 *= SIGN(TT[0][3] + TT[0][1]);
+          q3 *= SIGN(TT[0][2] + TT[1][2]);
+      } else if(q2 >= q0 && q2 >= q1 && q2 >= q3) {
+          q0 *= SIGN(TT[0][2] - TT[1][2]);
+          q1 *= SIGN(TT[0][3] + TT[0][1]);
+          q2 *= +1.0f;
+          q3 *= SIGN(TT[1][3] + TT[1][1]);
+      } else if(q3 >= q0 && q3 >= q1 && q3 >= q2) {
+          q0 *= SIGN(TT[0][3] - TT[0][1]);
+          q1 *= SIGN(TT[1][2] + TT[0][2]);
+          q2 *= SIGN(TT[1][3] + TT[1][1]);
+          q3 *= +1.0f;
+      } else {
+          //qDebug()<<"Error while converting to quaternion!";
+          //std::cout << "Error while converting to quaternion!" << std::endl;
+          return 0;
+      }
+	  */
+	double q0,q1,q2,q3;
+q0 = ( TT[0][0] + TT[1][1] + TT[2][2] + 1.0f) / 4.0f;
+q1 = ( TT[0][0] - TT[1][1] - TT[2][2] + 1.0f) / 4.0f;
+q2 = (-TT[0][0] + TT[1][1] - TT[2][2] + 1.0f) / 4.0f;
+q3 = (-TT[0][0] - TT[1][1] + TT[2][2] + 1.0f) / 4.0f;
+if(q0 < 0.0f) q0 = 0.0f;
+if(q1 < 0.0f) q1 = 0.0f;
+if(q2 < 0.0f) q2 = 0.0f;
+if(q3 < 0.0f) q3 = 0.0f;
+q0 = sqrt(q0);
+q1 = sqrt(q1);
+q2 = sqrt(q2);
+q3 = sqrt(q3);
+if(q0 >= q1 && q0 >= q2 && q0 >= q3) {
+    q0 *= +1.0f;
+    q1 *= SIGN(TT[2][1] - TT[1][2]);
+    q2 *= SIGN(TT[0][2] - TT[2][0]);
+    q3 *= SIGN(TT[1][0] - TT[0][1]);
+} else if(q1 >= q0 && q1 >= q2 && q1 >= q3) {
+    q0 *= SIGN(TT[2][1] - TT[1][2]);
+    q1 *= +1.0f;
+    q2 *= SIGN(TT[1][0] + TT[0][1]);
+    q3 *= SIGN(TT[0][2] + TT[2][0]);
+} else if(q2 >= q0 && q2 >= q1 && q2 >= q3) {
+    q0 *= SIGN(TT[0][2] - TT[2][0]);
+    q1 *= SIGN(TT[1][0] + TT[0][1]);
+    q2 *= +1.0f;
+    q3 *= SIGN(TT[2][1] + TT[1][2]);
+} else if(q3 >= q0 && q3 >= q1 && q3 >= q2) {
+    q0 *= SIGN(TT[1][0] - TT[0][1]);
+    q1 *= SIGN(TT[2][0] + TT[0][2]);
+    q2 *= SIGN(TT[2][1] + TT[1][2]);
+    q3 *= +1.0f;
+} else {
+    printf("coding error\n");
+}
+      double r = NORM4(q0, q1, q2, q3);;
+      q0 /= r;
+      q1 /= r;
+      q2 /= r;
+      q3 /= r;
+	  qq[0] = q0;
+	  qq[1] = q1;
+	  qq[2] = q2;
+	  qq[3] = q3;
+	  return 1;
+}
+/*
+void vector2rotmtx(double x, double y, double z, double D[4][4])
+{
+	double theta = 0;
+	double alpha = 0;
+	double beta =0;
+	double a = sqrt(x*x + y*y);
+	double r = sqrt(x*x + y*y + z*z);
+	if(r>0)
+	{
+		if(z<0)
+	        alpha = PI - asin(a/r);
+		else
+			alpha = asin(a/r);
+	}
+
+	if(a>0)
+	{
+		beta = acos(x/a);
+		if(x>0)
+		{
+			if(y<0)
+	            beta = -beta;
+		}
+		else
+		{
+	        if(y<0)
+		        beta = 2*PI-beta;
+		}
+	}
+	//alpha =  -alpha;
+	//beta =  -beta;
+	//transform matrix
+	double ROT_z1[4][4] = {{1,0,0,0}, {0, 1, 0, 0}, {0, 0, 1, 0},{0, 0, 0, 1}};
+	double ROT_Y[4][4] = {{cos(alpha), 0, sin(alpha), 0}, {0, 1, 0, 0}, {-sin(alpha), 0, cos(alpha), 0}, {0, 0, 0, 1}};
+	double ROT_Z2[4][4] = {{cos(beta), -sin(beta), 0, 0}, {sin(beta), cos(beta), 0, 0,}, {0, 0, 1, 0}, {0, 0, 0, 1}};
+//	double my_tool[4][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, r}, {0, 0, 0, 1}};
+	double TT[4][4];
+	MultiplyMatrix(ROT_z1, ROT_Z2, TT);
+	MultiplyMatrix(TT, ROT_Y, TT);
+	//MultiplyMatrix(ROT_z1, ROT_Y, TT);
+	//MultiplyMatrix(TT, ROT_Z2, TT);
+	//RotationTransformInverse4x4(TT,TT);
+
+	double qq[4];
+	//x = 0;
+	//y = -20;
+	//z = -200;
+	//qq[0] = 1;
+	//qq[1] = x;
+	//qq[2] = y;
+	//qq[3] = z;
+	double u[3] = {0,0,1};
+	double v[3];
+	double s[3];
+	r = NORM3(x, y, z);
+	v[0] =  x/r;
+	v[1] =  y/r;
+	v[2] =  z/r;
+	CrossProduct(u,v,s);
+	double m = sqrt(1+u[0]*v[0]+u[1]*v[1]+u[2]*v[2]);
+	qq[0] = 0.5*m;
+	qq[1] = s[0]/m;
+	qq[2] = s[1]/m;
+	qq[3] = s[2]/m;
+	//qq[0] = sqrt(1+u[0]*v[0]+u[1]*v[1]+u[2]*v[2]);
+	r = NORM4(qq[0], qq[1], qq[2], qq[3]);
+	qq[0] /= r;
+	qq[1] /= r;
+	qq[2] /= r;
+	qq[3] /= r;
+	quaternion_to_rotation(qq, TT);
+
+	for(int i=0;i<4;i++)
+	{
+		for(int j=0;j<4;j++)
+			D[i][j] = TT[i][j];
+	}
+}
+*/
+
+void vector2rotmtx(int id, double x, double y, double z, double D[4][4])
+{
+	double theta = 0;
+	double alpha = 0;
+	double beta =0;
+	double a = sqrt(x*x + y*y);
+	double r = sqrt(x*x + y*y + z*z);
+	if(r>0)
+	{
+		if(z<0)
+	        alpha = PI - asin(a/r);
+		else
+			alpha = asin(a/r);
+	}
+
+	if(a>0)
+	{
+		beta = acos(x/a);
+		if(x>0)
+		{
+			if(y<0)
+	            beta = -beta;
+		}
+		else
+		{
+	        if(y<0)
+		        beta = 2*PI-beta;
+		}
+	}
+	//if(id == 0)
+	//	theta = -PI/4;
+	//else if(id == 1)
+	//	theta = PI/4;
+	//transform matrix
+	//double ROT_z1[4][4] = {{1,0,0,0}, {0, 1, 0, 0}, {0, 0, 1, 0},{0, 0, 0, 1}};
+	double ROT_z1[4][4] = {{cos(theta), -sin(theta), 0, 0}, {sin(theta), cos(theta), 0, 0,}, {0, 0, 1, 0}, {0, 0, 0, 1}};
+	double ROT_Y[4][4] = {{cos(alpha), 0, sin(alpha), 0}, {0, 1, 0, 0}, {-sin(alpha), 0, cos(alpha), 0}, {0, 0, 0, 1}};
+	double ROT_Z2[4][4] = {{cos(beta), -sin(beta), 0, 0}, {sin(beta), cos(beta), 0, 0,}, {0, 0, 1, 0}, {0, 0, 0, 1}};
+	double my_tool[4][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, r}, {0, 0, 0, 1}};
+	double TT[4][4];
+	MultiplyMatrix(ROT_z1, ROT_Z2, TT);
+	MultiplyMatrix(TT, ROT_Y, TT);
+	//MultiplyMatrix(ROT_z1, ROT_Y, TT);
+	//MultiplyMatrix(TT, ROT_Z2, TT);
+	//RotationTransformInverse4x4(TT,TT);
+	for(int i=0;i<4;i++)
+	{
+		for(int j=0;j<4;j++)
+			D[i][j] = TT[i][j];
+	}
+}
+//arm frame fk transform
+void forward_kinematics_6dof_arm(double fk_j[6], double T[4][4])
+{
+	double T1[4][4];
+	for(int n=0;n<6;n++)
+	{
+		fk_j[n]= fk_j[n]*DEG2RAD;
+		fk_j[n] += arm_6dof_dh_theta_offset[n];
+	}
+
+	double Ttemp[4][4] = {0};
+	Ttemp[0][0] = 1;//identity matrix
+	Ttemp[1][1] = 1;
+	Ttemp[2][2] = 1;
+	Ttemp[3][3] = 1;
+	for(int i=0;i<6;i++)
+	{
+		dh_matrix(fk_j[i], arm_6dof_dh_d[i], arm_6dof_dh_a[i], arm_6dof_dh_alpha[i], T1);
+		MultiplyMatrix(Ttemp, T1, Ttemp);
+	}
+	for(int m=0;m<4;m++)
+		for(int n=0;n<4;n++)
+			T[m][n] = Ttemp[m][n];
+}
+//global frame fk transform
+void forward_kinematics_global_frame(int id, double fk_j[6])
+{
+	double Ttemp[4][4] = {0};
+	forward_kinematics_6dof_arm(fk_j, Ttemp);
+
+	if(id == RIGHT_TOOL_ARM_ID) //right
+	{
+		double Ttemp2[4][4] = FRAME_TRANSFORM_RIGHT_ARM_TO_GLOBAL;
+		MultiplyMatrix(Ttemp2, Ttemp, Ttemp);
+	}
+	else if(id == LEFT_TOOL_ARM_ID) //left
+	{
+		double Ttemp2[4][4] = FRAME_TRANSFORM_LEFT_ARM_TO_GLOBAL;
+		MultiplyMatrix(Ttemp2, Ttemp, Ttemp);
+	}
+
+	for(int i=0;i<4;i++)
+		for(int j=0;j<4;j++)
+		{
+			//store fk transform
+			fk_transform_global_frame[id][i][j] = Ttemp[i][j];
+		}
+}
+void forward_kinematics_calculation(int id)
+{
+	RT_DATA *p=(RT_DATA*)m_pSharedData;
+	double T1[4][4];
+	double Ttemp[4][4] = {0};
+	double fk_j[6];
+	for(int n=0;n<6;n++)
+	{
+		//if(n == 0 || n == 1)//joint0, 1
+		//	fk_j[n]= p->jixieshou_data[id].joint_pos[n+1];
+		//else
+		//	fk_j[n]= -p->jixieshou_data[id].joint_pos[n+1];
+			fk_j[n]= p->jixieshou_data[id].joint_pos[n+1];
+	}
+	//not use roll
+	//fk_j[5] = 0;
+	//ur5 joint 2 4 have -90 degree offset from our kinematics
+	fk_j[1] += 90;
+	fk_j[3] += 90;
+	//////////////////////////
+	forward_kinematics_global_frame(id, fk_j);
+
+	double Ttemp1[4][4] = {{1, 0, 0, 0},{0, 1, 0, 0},{0, 0, 1, TOOL_MOUNT_DIST+ TOOL_LENGTH},{0, 0, 0, 1}};//6dof to tool tip
+	MultiplyMatrix(fk_transform_global_frame[id],Ttemp1, Ttemp);
+
+	for(int i=0;i<4;i++)
+		for(int j=0;j<4;j++)
+			p->jixieshou_data[id].tranform[i][j] = Ttemp[i][j];
+	//tool tip positions from forward kinematics
+	p->jixieshou_data[id].act_pos_x = Ttemp[0][3];// - rcm_position[id][0];
+	p->jixieshou_data[id].act_pos_y = Ttemp[1][3];// - rcm_position[id][1];
+	p->jixieshou_data[id].act_pos_z = Ttemp[2][3];// - rcm_position[id][2];
+	//tool
+	p->jixieshou_data[id].act_roll = p->jixieshou_data[id].joint_pos[6];
+	p->jixieshou_data[id].act_pitch = p->jixieshou_data[id].joint_pos[7];
+	p->jixieshou_data[id].act_yaw = p->jixieshou_data[id].joint_pos[8];
+	p->jixieshou_data[id].act_grasp = p->jixieshou_data[id].joint_pos[9];
+
+}
+
+/*
+void forward_kinematics_calculation(int id)
+{
+	RT_DATA *p=(RT_DATA*)m_pSharedData;
+	double T1[4][4];
+	double Ttemp[4][4] = {0};
+	double fk_j[6];
+	for(int n=0;n<6;n++)
+	{
+		if(n == 0 || n == 1)//joint0, 1
+			fk_j[n]= p->jixieshou_data[id].joint_pos[n+1];
+		else
+			fk_j[n]= -p->jixieshou_data[id].joint_pos[n+1];
+	}
+	forward_kinematics_6dof_arm(fk_j, TOOL_LENGTH, Ttemp);
+
+	if(id == RIGHT_TOOL_ARM_ID) //right
+	{
+		double Ttemp2[4][4] = FRAME_TRANSFORM_RIGHT_ARM_TO_GLOBAL;
+		MultiplyMatrix(Ttemp2, Ttemp, Ttemp);
+	}
+	else if(id == LEFT_TOOL_ARM_ID) //left
+	{
+		double Ttemp2[4][4] = FRAME_TRANSFORM_LEFT_ARM_TO_GLOBAL;
+		MultiplyMatrix(Ttemp2, Ttemp, Ttemp);
+	}
+
+	for(int i=0;i<4;i++)
+		for(int j=0;j<4;j++)
+			p->jixieshou_data[id].tranform[i][j] = Ttemp[i][j];
+		//	p->jixieshou_data[id].tranform[0][3] = 0;
+		//	p->jixieshou_data[id].tranform[1][3] = 0;
+		//	p->jixieshou_data[id].tranform[2][3] = 0;
+	//positions from forward kinematics
+	p->jixieshou_data[id].act_pos_x = Ttemp[0][3];// - rcm_position[id][0];
+	p->jixieshou_data[id].act_pos_y = Ttemp[1][3];// - rcm_position[id][1];
+	p->jixieshou_data[id].act_pos_z = Ttemp[2][3];// - rcm_position[id][2];
+	//tool
+	p->jixieshou_data[id].act_roll = p->jixieshou_data[id].joint_pos[6];
+	p->jixieshou_data[id].act_pitch = p->jixieshou_data[id].joint_pos[7];
+	p->jixieshou_data[id].act_yaw = p->jixieshou_data[id].joint_pos[8];
+	p->jixieshou_data[id].act_grasp = p->jixieshou_data[id].joint_pos[9];
+
+}
+*/
+
+/////////////////////////
+
+int FindQuadrant(double x, double y)
+{
+	int quadrantNum;
+	if (x * y ==0)
+	{
+		quadrantNum = -1;
+		return quadrantNum;
+	}
+
+	if (x * y > 0)
+	{
+		if (x > 0)
+			quadrantNum = 1;
+		else
+			quadrantNum = 3;
+	}
+	else
+	{
+		if(x > 0)
+			quadrantNum = 2;
+		else
+			quadrantNum = 4;
+	}
+	return quadrantNum;
+}
+
+void CalcTheta1(double m, double n, double r, int *sol_num, double theta[2])
+{
+	//double theta = 0;
+	double L = sqrt(m*m + n*n);
+	double alpha = RAD2DEG * acos(r/L);
+	double beta = abs(RAD2DEG*(atan(m/n)));
+	//double alpha = acos(r/L);
+	//double beta = abs((atan(m/n)));
+
+	if (0.0000001 > m*m+n*n-r*r)
+	{
+		if( m > 0)
+		{
+			if (n > 0)
+				theta[0] = 180 - beta;
+			else if( n < 0)
+				theta[0] = beta;
+			else
+				theta[0] = 90;
+		}
+		else if( m < 0)
+		{
+			if (n > 0)
+				theta[0] = -180 + beta;
+			else if( n < 0)
+				theta[0] = -beta;
+			else
+				theta[0] = -90;     
+		}
+		else
+		{
+			if( n > 0)
+				theta[0] = 180;
+			else
+				theta[0] = 0;
+		}
+		*sol_num = 1;
+	}
+	else
+	{
+		double gamma = alpha + beta;
+		double xi = alpha - beta;
+    
+		int quadrant = FindQuadrant(m, n);
+    
+		switch (quadrant)
+		{
+			case 1:
+				theta[0] = 180 - gamma;
+				theta[1] = xi - 180;
+			break;
+			case 2:
+				theta[0] = gamma;
+				theta[1] = -xi;
+			break;
+			case 3:
+				theta[0] = xi;
+				theta[1] = -gamma;
+			break;
+			case 4:
+				theta[0] = 180 - xi;
+				theta[1] = gamma - 180;
+			default:
+				
+			break;
+		}
+		*sol_num = 2;
+	}
+
+
+}
+double CalcRad2(double vCos, double vSin)
+{
+    vCos = vCos > 1.0? 1.0: vCos;
+    vCos = vCos < -1.0? -1.0: vCos;
+    vSin = vSin > 1.0? 1.0: vSin;
+    vSin = vSin < -1.0? -1.0: vSin;
+
+    if(vCos >= 0)
+            return asin(vSin);
+    else
+    {
+        if(vSin >= 0)
+            return acos(vCos);
+        else
+            return -acos(vCos);
+    }
+}
+double CalcRad(double vCos, double vSin)
+{
+	double rad;
+	if(vCos >= 0)
+	{
+		if(vSin >= 0)
+		{
+			if(vSin>1.0)
+				vSin = 1.0;
+			rad = asin(vSin);
+		}
+		else
+		{
+			if(vSin<-1.0)
+				vSin = -1.0;
+			rad = asin(vSin);
+		}
+	}
+	else
+	{
+		if(vCos < -1.0)
+			vCos = -1.0;
+		if(vSin >= 0)
+		{
+			rad = acos(vCos);
+		}
+		else
+		{
+			rad = -acos(vCos);
+		}
+	}
+	return rad;
+}
+double limitRange(double input)
+{
+	double ouput;
+	if(input > PI)
+		ouput = double(input - PI*2);
+	else if(input < -PI)
+		ouput = double(input + PI*2);
+	else
+	 ouput = input;
+	return ouput;
+}
+
+int inverse_kinematics_6dof_arm(double transform[4][4], double ik_j[8][6])
+{
+	double Tool_inv[4][4] = {{1, 0, 0, 0},{0, 1, 0, 0},{0, 0, 1, -(TOOL_MOUNT_DIST+TOOL_LENGTH)},{0, 0, 0, 1}};//6dof to tool tip
+	double Ttemp[4][4];
+	MultiplyMatrix(transform,Tool_inv,Ttemp);
+	/////////////////
+	double r = DH_d1;
+	double T14 = Ttemp[0][3];
+	double T24 = Ttemp[1][3];
+	double theta1_temp[2];
+	int solution_num = 0;
+	int sol_num1 = 0;
+	int sol_num56 = 0;
+	CalcTheta1(T14,T24, r, &sol_num1, theta1_temp);
+	if(sol_num1 != 1 && sol_num1 != 2) return 0; //no solution
+	double ik_solution[8][6];
+	double theta_temp[4][3];//j1 j5 j6
+	double t1234_limit = 1.00001;
+	//j1 two solutions, one j1 has two j5&j6 solutions, so max four j1j5j6 solutions
+	for(int i=0;i<sol_num1;i++)
+	{
+		double theta5_temp;
+		double theta6_temp[2];
+		double T26[4][4];
+		double inv_A1[4][4];//
+		theta1_temp[i] = theta1_temp[i]*DEG2RAD;
+		dh_inv_matrix(theta1_temp[i], arm_6dof_dh_d[0], arm_6dof_dh_a[0], arm_6dof_dh_alpha[0], inv_A1);
+		MultiplyMatrix(inv_A1, Ttemp, T26);
+		/////5
+		theta5_temp = acos(double(-T26[1][2]));
+		/////////
+		if(T26[1][2] == 1 || T26[1][2] == -1)
+		{
+	        theta6_temp[i*2+0] = 0;
+	        theta6_temp[i*2+1] = 0;
+		}
+		else
+		{
+			double t1 = T26[1][0]/sin(theta5_temp);
+			double t2 = -T26[1][1]/sin(theta5_temp);
+        
+			double t3 = T26[1][0]/sin(-theta5_temp);
+			double t4 = -T26[1][1]/sin(-theta5_temp);
+			if(t1>t1234_limit || t1<-t1234_limit) continue;
+			if(t2>t1234_limit || t2<-t1234_limit) continue;
+			if(t3>t1234_limit || t3<-t1234_limit) continue;
+			if(t4>t1234_limit || t4<-t1234_limit) continue;
+        
+			theta6_temp[0] = CalcRad(t1, t2);
+			theta6_temp[1] = CalcRad(t3, t4);
+		}
+		theta_temp[sol_num56][0] = theta1_temp[i];
+		theta_temp[sol_num56][1] = theta5_temp;
+		theta_temp[sol_num56][2] = theta6_temp[0];
+		sol_num56++;
+		if((theta5_temp == 0)&&(theta6_temp[0] == theta6_temp[1])) continue;
+		theta_temp[sol_num56][0] = theta1_temp[i];
+		theta_temp[sol_num56][1] = -theta5_temp;
+		theta_temp[sol_num56][2] = theta6_temp[1];
+		sol_num56++;
+	}
+	//solve j2,j3,j4
+	for(int i=0;i<sol_num56;i++)
+	{
+	    double theta1 = theta_temp[i][0];
+	    double theta5 = theta_temp[i][1];
+		double theta6 = theta_temp[i][2];
+
+		double inv_A1[4][4];
+		double inv_A5[4][4];
+		double inv_A6[4][4];
+		double T24[4][4];
+		dh_inv_matrix(theta1, arm_6dof_dh_d[0], arm_6dof_dh_a[0], arm_6dof_dh_alpha[0], inv_A1);
+		dh_inv_matrix(theta5, arm_6dof_dh_d[4], arm_6dof_dh_a[4], arm_6dof_dh_alpha[4], inv_A5);
+		dh_inv_matrix(theta6, arm_6dof_dh_d[5], arm_6dof_dh_a[5], arm_6dof_dh_alpha[5], inv_A6);
+
+		MultiplyMatrix(inv_A1, Ttemp, T24);
+		MultiplyMatrix(T24, inv_A6, T24);
+		MultiplyMatrix(T24, inv_A5, T24);
+
+		double px = T24[0][3];
+		double pz = T24[2][3];
+    
+		double a = px*px + pz*pz;
+		double len = sqrt(a);
+		double len1 = (DH_a2*DH_a2-DH_a3*DH_a3+a)/(2*DH_a2*len);
+		double beta=0;
+		if(len1>1.01 || len1<-1.01)
+			continue;
+		if((len1 > 1.0)) len1 = 1.0;
+		if((len1 < -1.0)) len1 = -1.0;
+		if(T24[0][3] !=0)
+		{
+			beta = abs(T24[2][3]/T24[0][3]);
+			beta = atan(beta);
+		}
+		else
+		{
+			beta = PI/2;
+		}
+
+		double gamma1 = acos(len1);
+		double gamma2 = acos(-len1);
+
+		double theta2_1, theta2_2;
+		if(px > 0)
+		{
+			if(pz > 0)
+			{
+				theta2_1 = (beta - gamma1); 
+				theta2_2 = (beta + gamma1);
+			}
+			else
+			{
+				theta2_1 = (gamma1 - beta); 
+				theta2_2 = (-gamma1 - beta);
+			}
+		}
+		else
+		{
+			if(pz > 0)
+			{
+				theta2_1 = (gamma2 - beta); 
+				theta2_2 = (-gamma2 - beta);
+			}
+			else
+			{
+				theta2_1 = (beta - gamma2); 
+				theta2_2 = (beta + gamma2);
+			}
+		}
+ 
+		//calculate theta3
+		double t1 = (T24[0][3] - DH_a2 * cos(theta2_1)) / DH_a3;
+		double t2 = (T24[2][3] - DH_a2 * sin(theta2_1)) / DH_a3;
+		double t3 = (T24[0][3] - DH_a2 * cos(theta2_2)) / DH_a3;
+		double t4 = (T24[2][3] - DH_a2 * sin(theta2_2)) / DH_a3;
+		double sum234 = CalcRad(T24[0][0], T24[2][0]);
+		if(t1>t1234_limit || t1<-t1234_limit) continue;
+		if(t2>t1234_limit || t2<-t1234_limit) continue;
+		if(t3>t1234_limit || t3<-t1234_limit) continue;
+		if(t4>t1234_limit || t4<-t1234_limit) continue;
+		double theta3_1 = CalcRad(t1, t2) - theta2_1;
+		double theta3_2 = CalcRad(t3, t4) - theta2_2;
+
+		ik_solution[solution_num][0] = theta1;
+		ik_solution[solution_num][1] = limitRange(theta2_1 - PI/2);
+		ik_solution[solution_num][2] = limitRange(theta3_1);
+		ik_solution[solution_num][3] = limitRange(sum234 - theta2_1 - theta3_1 + PI/2);
+		ik_solution[solution_num][4] = theta5;
+		ik_solution[solution_num][5] = theta6;
+		solution_num++;
+		if((theta3_1 == theta3_2)&&(theta2_1 == theta2_2)) continue;
+		ik_solution[solution_num][0] = theta1;
+		ik_solution[solution_num][1] = limitRange(theta2_2 - PI/2);
+		ik_solution[solution_num][2] = limitRange(theta3_2);
+		ik_solution[solution_num][3] = limitRange(sum234 - theta2_2 - theta3_2 + PI/2);
+		ik_solution[solution_num][4] = theta5;
+		ik_solution[solution_num][5] = theta6;
+		solution_num++;
+    //theta = [theta;theta1, limitRange(theta5_2 - pi/2), limitRange(theta4_2), limitRange(sum234 - theta5_2 - theta4_2 + pi/2), theta5, theta6];
+
+	}
+	for(int i=0;i<solution_num;i++)
+	{
+		for(int j=0;j<6;j++)
+		{		
+			ik_solution[i][j] = ik_solution[i][j]*180.0/PI;
+			ik_j[i][j] = ik_solution[i][j];
+		}
+	}
+	//check solution with actual joint angles
+	return solution_num;
+
+}
+
+//ik by using arm global frame position
+int inverse_kinematics_calculation(int id, double ref_pos[3], double rcm_pos[3])
+{
+	RT_DATA *p = (RT_DATA*)m_pSharedData;;
+
+	double Ttemp[4][4] = {{1, 0, 0, ref_pos[0]},{0, 1, 0, ref_pos[1]},{0, 0, 1, ref_pos[2]},{0, 0, 0, 1}};//
+	double Ttemp1[4][4] = {{1, 0, 0, 0},{0, 1, 0, 0},{0, 0, 1, 0},{0, 0, 0, 1}};
+	double xx1, yy1, zz1;
+	xx1 = (ref_pos[0] - rcm_pos[0]);
+	yy1 = (ref_pos[1] - rcm_pos[1]);
+	zz1 = (ref_pos[2] - rcm_pos[2]);
+	vector2rotmtx(id, xx1,yy1,zz1, Ttemp);
+
+	double TT[4][4]={0};
+	double qq[4];
+	for(int i=0;i<4;i++)
+		for(int j=0;j<4;j++)
+		{
+			TT[i][j] = p->jixieshou_data[id].tranform[i][j];
+		}
+	//rotation_to_quaternion(TT, qq);
+	//double TTT[4][4];
+	//quaternion_to_rotation(qq, TTT);
+
+  Ttemp[0][3] = ref_pos[0];
+  Ttemp[1][3] = ref_pos[1];
+  Ttemp[2][3] = ref_pos[2];
+
+	//////////////
+	if(id == RIGHT_TOOL_ARM_ID)
+	{
+		double Ttemp2[4][4] = FRAME_TRANSFORM_GLOBAL_TO_RIGHT_ARM;
+		MultiplyMatrix(Ttemp2,Ttemp, Ttemp);
+	}
+	else if(id == LEFT_TOOL_ARM_ID)
+	{
+		double Ttemp2[4][4] = FRAME_TRANSFORM_GLOBAL_TO_LEFT_ARM;
+		MultiplyMatrix(Ttemp2,Ttemp, Ttemp);
+	}
+
+	double ik_j[8][6];
+	int sol_num = 0;
+	sol_num  = inverse_kinematics_6dof_arm(Ttemp, ik_j);
+	/////choose solution
+	int is_solution_found = 0; 
+	double found_solution[6];
+	for(int i=0;i<sol_num;i++)
+	{
+		for(int n=0;n<6;n++)
+		{
+			//if(n == 0 || n == 1)
+			//	ik_j[i][n] = ik_j[i][n];
+			//else
+			//	ik_j[i][n] = - ik_j[i][n];
+			ik_j[i][n] = ik_j[i][n];
+
+			if(n == 0)
+			{
+				if(fabs(ik_j[i][0])>60) 
+					break;
+			}
+			if(n == 1)
+			{
+				if(fabs(ik_j[i][1])>90) 
+					break;
+			}
+			//if(n == 3)
+			//{
+			//	if (fabs(ik_j[i][3]) > 90)
+			//	{
+			//		if(fabs(p->jixieshou_data[id].joint_pos[n+1] - ik_j[i][n]) > 35.0)
+			//		break;
+			//	}
+			//}
+			if(n == 5)
+				ik_j[i][n] = 0;
+
+
+			//ur5 joint 2 4 have -90 degree offset from our kinematics
+			if(n == 1)
+				ik_j[i][n] -= 90.;
+			if(n == 3)
+				ik_j[i][n] -= 90.;
+			/////////////
+			
+			if(fabs(p->jixieshou_data[id].joint_pos[n+1] - ik_j[i][n]) > 35.0)
+				if (n!=5)//not use roll
+				break;
+			found_solution[n] = ik_j[i][n];
+			if(n == 5)
+			{
+				is_solution_found = 1;
+				i = sol_num + 1;
+				break;
+			}
+		}
+	}
+	/////////////////
+	if(is_solution_found == 1)
+	{
+		for(int n=0;n<6;n++)
+		{
+			p->jixieshou_data[id].inv_kin_joint_pos[n+1] = found_solution[n];
+		}
+		p->jixieshou_data[id].inv_kin_joint_pos[0] = p->jixieshou_data[id].ref_joint_pos[0];//up/down
+		p->jixieshou_data[id].inv_kin_joint_pos[6] = p->jixieshou_data[id].ref_roll;
+		p->jixieshou_data[id].inv_kin_joint_pos[7] = p->jixieshou_data[id].ref_pitch;
+		p->jixieshou_data[id].inv_kin_joint_pos[8] = p->jixieshou_data[id].ref_yaw;
+		p->jixieshou_data[id].inv_kin_joint_pos[9] = p->jixieshou_data[id].ref_grasp;
+		return 1;
+	}
+	else
+		return 0;
+}
+
+/*
+int inverse_kinematics_calculation(int id, double ref_x, double ref_y, double ref_z)//
+{
+	RT_DATA *p = (RT_DATA*)m_pSharedData;;
+
+	//invkin
+	//double ref_x, ref_y, ref_z;
+	//double x,y,z;
+	//double s1, s2_linear, s2, s3;//solution joint position
+
+	double Ttemp[4][4] = {{1, 0, 0, ref_x},{0, 1, 0, ref_y},{0, 0, 1, ref_z},{0, 0, 0, 1}};//
+	double Ttemp1[4][4] = {{1, 0, 0, 0},{0, 1, 0, 0},{0, 0, 1, 0},{0, 0, 0, 1}};
+	double xx1, yy1, zz1;
+	xx1 = (ref_x - rcm_position[id][0]);
+	yy1 = (ref_y - rcm_position[id][1]);
+	zz1 = (ref_z - rcm_position[id][2]);
+	//vector2rotmtx(xx1,yy1,zz1, Ttemp);
+	//xx1 = 0;
+	//yy1 =-30;
+	//zz1 = -100;
+	vector2rotmtx(id, xx1,yy1,zz1, Ttemp);
+	//vector2rotmtx(xx1,yy1,zz1, Ttemp);
+	//Ttemp[0][3] += rcm_position[id][0];
+	//Ttemp[1][3] += rcm_position[id][1];
+	//Ttemp[2][3] += rcm_position[id][2];
+
+	////////////// test //-3, 72, -40, 25, 32, 0
+//	double T_test[4][4] = {{1, 0, 0, 600},{0, 1, 0, 50},{0, 0, 1, -180},{0, 0, 0,1.0000}};
+	//right 0
+//	double T_test[4][4] = {{-0.4890, 0.8375, -0.2438, 655.0117},{0.7112, 0.5446, 0.4444, 629.0937},{0.5050, 0.0439, -0.8620, -179.9915},{0, 0, 0,1.0000}};
+	//left 1
+// 	double T_test[4][4] = {{0.4890, -0.8375, 0.2438, -655.0117},{-0.7112, -0.5446, -0.4444, -629.0937},{0.5050, 0.0439, -0.8620, -179.9915},{0, 0, 0,1.0000}};
+	for(int i=0;i<4;i++)
+		for(int j=0;j<4;j++)
+		{
+			//Ttemp[i][j] = p->jixieshou_data[id].tranform[i][j];
+			//Ttemp[i][j] = T_test[i][j];
+		}
+		
+	double TT[4][4]={0};
+	double qq[4];
+	for(int i=0;i<4;i++)
+		for(int j=0;j<4;j++)
+		{
+			TT[i][j] = p->jixieshou_data[id].tranform[i][j];
+		}
+	//rotation_to_quaternion(TT, qq);
+	//double TTT[4][4];
+	//quaternion_to_rotation(qq, TTT);
+
+  Ttemp[0][3] = ref_x;
+  Ttemp[1][3] = ref_y;
+  Ttemp[2][3] = ref_z;
+
+	//////////////
+	if(id == RIGHT_TOOL_ARM_ID)
+	{
+		double Ttemp2[4][4] = FRAME_TRANSFORM_GLOBAL_TO_RIGHT_ARM;
+		MultiplyMatrix(Ttemp2,Ttemp, Ttemp);
+	}
+	else if(id == LEFT_TOOL_ARM_ID)
+	{
+		double Ttemp2[4][4] = FRAME_TRANSFORM_GLOBAL_TO_LEFT_ARM;
+		MultiplyMatrix(Ttemp2,Ttemp, Ttemp);
+	}
+
+	double ik_j[8][6];
+	int sol_num = 0;
+	sol_num  = inverse_kinematics_6dof_arm(Ttemp, ik_j);
+	/////choose solution
+	int is_solution_found = 0; 
+	double found_solution[6];
+	for(int i=0;i<sol_num;i++)
+	{
+		for(int n=0;n<6;n++)
+		{
+			if(n == 0 || n == 1)
+				ik_j[i][n] = ik_j[i][n];
+			else
+				ik_j[i][n] = - ik_j[i][n];
+			if(n == 0)
+			{
+				if(fabs(ik_j[i][0])>60) 
+					break;
+			}
+			if(n == 1)
+			{
+				if(fabs(ik_j[i][1])>90) 
+					break;
+			}
+			if(n == 3)
+			{
+				if(fabs(ik_j[i][3])>90) 
+				{
+					if(fabs(p->jixieshou_data[id].joint_pos[n+1] - ik_j[i][n]) > 15.0)
+					break;
+				}
+			}
+			if(n == 5)
+				ik_j[i][n] = 0;
+			if(fabs(p->jixieshou_data[id].joint_pos[n+1] - ik_j[i][n]) > 35.0)
+				break;
+			found_solution[n] = ik_j[i][n];
+			if(n == 5)
+			{
+				is_solution_found = 1;
+				i = sol_num + 1;
+				break;
+			}
+		}
+	}
+	/////////////////
+	if(is_solution_found == 1)
+	{
+		for(int n=0;n<6;n++)
+		{
+			p->jixieshou_data[id].inv_kin_joint_pos[n+1] = found_solution[n];
+		}
+		p->jixieshou_data[id].inv_kin_joint_pos[0] = p->jixieshou_data[id].ref_joint_pos[0];//up/down
+		p->jixieshou_data[id].inv_kin_joint_pos[6] = p->jixieshou_data[id].ref_roll;
+		p->jixieshou_data[id].inv_kin_joint_pos[7] = p->jixieshou_data[id].ref_pitch;
+		p->jixieshou_data[id].inv_kin_joint_pos[8] = p->jixieshou_data[id].ref_yaw;
+		p->jixieshou_data[id].inv_kin_joint_pos[9] = p->jixieshou_data[id].ref_grasp;
+		return 1;
+	}
+	else
+		return 0;
+}
+*/
+//////////virtual rcm and insertion
+
+int set_RCM(int id)
+{
+	RT_DATA *p = (RT_DATA*)m_pSharedData;
+	rcm_position[id][0] = p->jixieshou_data[id].act_pos_x;
+	rcm_position[id][1] = p->jixieshou_data[id].act_pos_y;
+	rcm_position[id][2] = p->jixieshou_data[id].act_pos_z;
+	virtualRCM_work_mode[id] = VIRTUAL_RCM_WORK_MODE_INSERTION_MOTION;
+	return 0;
+}
+
+//insert tool along tool shaft pose for a distance 
+int insert_tool(int id, double distance)
+{
+	//if insertion is enough, then switch to teleoperation mode, otherwise switch to insertion/remove mode
+	RT_DATA *p = (RT_DATA*)m_pSharedData;
+	double Ttemp[4][4];
+	double Ttemp1[4][4] = {{1, 0, 0, 0},{0, 1, 0, 0},{0, 0, 1, TOOL_MOUNT_DIST+ TOOL_LENGTH + distance},{0, 0, 0, 1}};//6dof to tool tip
+	MultiplyMatrix(fk_transform_global_frame[id],Ttemp1, Ttemp);
+
+	for(int i=0;i<4;i++)
+		for(int j=0;j<4;j++)
+			p->jixieshou_data[id].ref_tranform[i][j] = Ttemp[i][j];
+	p->jixieshou_data[id].ref_pos_x = Ttemp[0][3];
+	p->jixieshou_data[id].ref_pos_y = Ttemp[1][3];
+	p->jixieshou_data[id].ref_pos_z = Ttemp[2][3];
+	return 0;
+}
+//tool length in the body, +inside body, 0trocar rcm,  -outside of body
+int calculate_insertion_length(int id, double *length)
+{
+	RT_DATA *p=(RT_DATA*)m_pSharedData;
+	double distance = 0;
+	double tip_position[3];
+	tip_position[0] = p->jixieshou_data[id].act_pos_x;
+	tip_position[1] = p->jixieshou_data[id].act_pos_y;
+	tip_position[2] = p->jixieshou_data[id].act_pos_z;
+	double r0 = tip_position[0] - rcm_position[id][0];
+	double r1 = tip_position[1] - rcm_position[id][1];
+	double r2 = tip_position[2] - rcm_position[id][2];
+
+	distance = sqrt(r0*r0 + r1*r1 + r2*r2);
+	if(r2 < 0)
+		*length = distance;
+	else
+		*length = -distance;
+	return 0;
+}
+///////////////////////
+void joint_limit(int id)
+{
+	RT_DATA *p=(RT_DATA*)m_pSharedData;
+
+	for(int i=0;i<MAX_DOF_JIXIESHOU;i++)
+	{
+		if(p->jixieshou_data[id].joint_pos[i]>JointAngleMax_ToolArm1[i])
+			p->jixieshou_data[id].joint_pos[i] = JointAngleMax_ToolArm1[i];
+		if(p->jixieshou_data[id].joint_pos[i]<JointAngleMin_ToolArm1[i])
+			p->jixieshou_data[id].joint_pos[i] = JointAngleMin_ToolArm1[i];
+	}
+	
+}
+void invkin_copyto_ref_joint_limit(int id)
+{
+	RT_DATA *p=(RT_DATA*)m_pSharedData;
+	int i_reaching_joint_limit = 0;
+	for(int i=0;i<MAX_DOF_JIXIESHOU;i++)
+	{
+		double aa = p->jixieshou_data[id].inv_kin_joint_pos[i];
+		if(aa > JointAngleMax_ToolArm1[i])
+			aa = JointAngleMax_ToolArm1[i];
+		if(aa<JointAngleMin_ToolArm1[i])
+			aa = JointAngleMin_ToolArm1[i];
+	}
+	for(int i=0;i<MAX_DOF_JIXIESHOU;i++)
+	{
+		p->jixieshou_data[id].ref_joint_pos[i] = p->jixieshou_data[id].inv_kin_joint_pos[i];
+	}
+	/*
+	for(int i=0;i<MAX_DOF_JIXIESHOU;i++)
+	{
+		double aa = p->jixieshou_data[id].inv_kin_joint_pos[i];
+		if(aa > JointAngleMax_ToolArm1[i])
+			aa = JointAngleMax_ToolArm1[i];
+		if(aa<JointAngleMin_ToolArm1[i])
+			aa = JointAngleMin_ToolArm1[i];
+		p->jixieshou_data[id].ref_joint_pos[i] = aa;
+	}*/
+}
+void button_input_ref_joint_limit(int id)
+{
+	RT_DATA *p=(RT_DATA*)m_pSharedData;
+
+	for(int i=0;i<MAX_DOF_JIXIESHOU;i++)
+	{
+		double aa = p->jixieshou_data[id].ref_joint_pos[i];
+		if(aa > JointAngleMax_ToolArm1[i])
+			aa = JointAngleMax_ToolArm1[i];
+		if(aa<JointAngleMin_ToolArm1[i])
+			aa = JointAngleMin_ToolArm1[i];
+		p->jixieshou_data[id].ref_joint_pos[i] = aa;
+	}
+}
+/*void transform_baiweibi(int id)
+{
+	RT_DATA *p=(RT_DATA*)m_pSharedData;
+	double T1[4][4];
+	//baiwei frame is same as chai3d frame
+	//j1 up/down mm
+	baiweibi_dh_d[id][0] = p->baiweibi_data[id].joint_position[0];
+	//j2
+	if(id == 0)
+		baiweibi_dh_theta[id][1] =  (-90+p->baiweibi_data[id].joint_position[1])*DEG2RAD;
+	else if(id == 1)
+		baiweibi_dh_theta[id][1] =  (90+p->baiweibi_data[id].joint_position[1]+180)*DEG2RAD;
+	//j3
+	baiweibi_dh_theta[id][2]= (90+p->baiweibi_data[id].joint_position[2])*DEG2RAD;
+	//j4
+	baiweibi_dh_theta[id][3]= p->baiweibi_data[id].joint_position[3]*DEG2RAD;
+	double Ttemp[4][4] = {0};
+	Ttemp[0][0] = 1;//identity matrix
+	Ttemp[1][1] = 1;
+	Ttemp[2][2] = 1;
+	Ttemp[3][3] = 1;
+	for(int i=0;i<4;i++)
+	{
+		dh_matrix(baiweibi_dh_theta[id][i], baiweibi_dh_d[id][i], baiweibi_dh_a[id][i], baiweibi_dh_alpha[id][i], T1);
+		MultiplyMatrix(Ttemp, T1, Ttemp);
+	}
+	double Ttemp1[4][4] = { //rot 90deg about z , baiwei joint4 frame to robot base frame transform
+		{0, -1, 0, 0},
+		{1, 0, 0, 0},
+		{0, 0, 1, 0},
+		{0, 0, 0, 1}};
+	MultiplyMatrix(Ttemp, Ttemp1,Ttemp);
+
+	for(int i=0;i<4;i++)
+		for(int j=0;j<4;j++)
+			p->baiweibi_data[id].tranform[i][j] = Ttemp[i][j];
+			p->baiweibi_data[id].tranform[0][3] = 0;
+			p->baiweibi_data[id].tranform[1][3] = 0;
+			p->baiweibi_data[id].tranform[2][3] = 0;
+	//baiweibi frame positions from forward kinematics
+	//convert to chai3d frame
+	double Ttemp2[4][4] = FRAME_TRANSFORM_BAIWEIBASE_TO_GLOBAL;//new baiwei base frame to chai3d frame
+	MultiplyMatrix(Ttemp2,Ttemp, Ttemp);
+
+	p->baiweibi_data[id].act_pos_x = Ttemp[0][3];
+	p->baiweibi_data[id].act_pos_y = Ttemp[1][3];
+	p->baiweibi_data[id].act_pos_z = Ttemp[2][3];
+
+}*/
+
+void sim_instrument_control()
+{
+	RT_DATA *p=(RT_DATA*)m_pSharedData;	
+	for(int id=0;id<2;id++)
+	{
+		if(p->jixieshou_data[id].instrument_data.power_on_off == INSTRUMENT_STATUS_ON)
+		{
+			double aa;
+			aa = p->jixieshou_data[id].instrument_data.act_power_level;
+			aa += (p->jixieshou_data[id].instrument_data.ref_power_level - p->jixieshou_data[id].instrument_data.act_power_level) * 0.005;
+			if(aa >100) aa = 100;
+			else if(aa <0) aa = 0;
+			p->jixieshou_data[id].instrument_data.act_power_level = aa;
+		}
+		else
+		{
+			p->jixieshou_data[id].instrument_data.act_power_level = 0;
+		}
+	}
+}
+void sim_joint_motion(int id)
+{
+	RT_DATA *p=(RT_DATA*)m_pSharedData;	
+	//for(int id=0;id<2;id++)
+	//{
+		for(int n=0;n<MAX_DOF_JIXIESHOU;n++)
+		{
+	
+			double aa;
+			aa = p->jixieshou_data[id].joint_pos[n];
+			aa += (p->jixieshou_data[id].ref_joint_pos[n]-p->jixieshou_data[id].joint_pos[n])*0.01;		
+			/*if(aa>JointAngleMax_ToolArm1[n])
+				aa = JointAngleMax_ToolArm1[n];
+			if(aa<JointAngleMin_ToolArm1[n])
+				aa = JointAngleMin_ToolArm1[n];*/
+			p->jixieshou_data[id].joint_pos[n] = aa;
+		}
+		joint_limit(id);
+	//}
+}
+void UR5_control(int id)
+{
+	RT_DATA *p=(RT_DATA*)m_pSharedData;	
+	double j[6];
+	double ref_j[6];
+	for (int n = 0; n < 6; n++)
+	{
+		ref_j[n] = p->jixieshou_data[id].ref_joint_pos[n+1];
+	}	
+	UR5_set_desired_joint_angle(id, ref_j);
+	UR5_joint_control(id);
+	UR5_get_actual_joint_angle(id, j);
+	for (int n = 0; n < 6; n++)
+	{
+		p->jixieshou_data[id].joint_pos[n + 1] = j[n];
+	}
+
+}
+
+void check_hardware_errors()
+{
+
+}
+
+void check_software_errors()
+{
+
+}
+
+void check_errors()
+{
+
+}
+
+void load_default_joint_position()//default joint position after initialization
+{
+	RT_DATA *p=(RT_DATA*)m_pSharedData;
+	int id;
+	id = 0;
+/*	p->baiweibi_data[id].joint_position[0] = BAIWEIBI_DEFAULT_POSITION_J1;
+	p->baiweibi_data[id].joint_position[1] = BAIWEIBI_DEFAULT_POSITION_J2;
+	p->baiweibi_data[id].joint_position[2] = -BAIWEIBI_DEFAULT_POSITION_J3;
+	p->baiweibi_data[id].joint_position[3] = -BAIWEIBI_DEFAULT_POSITION_J4;
+	id = 1;
+	p->baiweibi_data[id].joint_position[0] = BAIWEIBI_DEFAULT_POSITION_J1;
+	p->baiweibi_data[id].joint_position[1] = -BAIWEIBI_DEFAULT_POSITION_J2;
+	p->baiweibi_data[id].joint_position[2] = BAIWEIBI_DEFAULT_POSITION_J3;
+	p->baiweibi_data[id].joint_position[3] = BAIWEIBI_DEFAULT_POSITION_J4;*/
+	for(int n=0;n<MAX_DOF_JIXIESHOU;n++)
+	{
+		p->jixieshou_data[0].ref_joint_pos[n] = DefaultJointPosition_Right[n];
+		p->jixieshou_data[1].ref_joint_pos[n] = DefaultJointPosition_Left[n];
+	}
+	rcm_position[0][0] = DEFAULT_RCM_POS_X;
+	rcm_position[0][1] = DEFAULT_RCM_POS_Y;
+	rcm_position[0][2] = DEFAULT_RCM_POS_Z;
+	rcm_position[1][0] = DEFAULT_RCM_POS_X;
+	rcm_position[1][1] = -DEFAULT_RCM_POS_Y;
+	rcm_position[1][2] = DEFAULT_RCM_POS_Z;
+	virtualRCM_work_mode[0] = VIRTUAL_RCM_WORK_MODE_TELEOPERATION;
+	virtualRCM_work_mode[1] = VIRTUAL_RCM_WORK_MODE_TELEOPERATION;
+	p->pedal_on_off = 0;
+}
+
+void load_default_rcm_joint_position()
+{
+	RT_DATA *p=(RT_DATA*)m_pSharedData;
+	int id;
+	id = 0;
+/*	p->baiweibi_data[id].joint_position[0] = BAIWEIBI_DEFAULT_POSITION_J1;
+	p->baiweibi_data[id].joint_position[1] = BAIWEIBI_DEFAULT_POSITION_J2;
+	p->baiweibi_data[id].joint_position[2] = -BAIWEIBI_DEFAULT_POSITION_J3;
+	p->baiweibi_data[id].joint_position[3] = -BAIWEIBI_DEFAULT_POSITION_J4;
+	id = 1;
+	p->baiweibi_data[id].joint_position[0] = BAIWEIBI_DEFAULT_POSITION_J1;
+	p->baiweibi_data[id].joint_position[1] = -BAIWEIBI_DEFAULT_POSITION_J2;
+	p->baiweibi_data[id].joint_position[2] = BAIWEIBI_DEFAULT_POSITION_J3;
+	p->baiweibi_data[id].joint_position[3] = BAIWEIBI_DEFAULT_POSITION_J4;*/
+	for(int n=0;n<MAX_DOF_JIXIESHOU;n++)
+	{
+		p->jixieshou_data[0].ref_joint_pos[n] = JointAngle_at_RCM_Right[n];
+		p->jixieshou_data[1].ref_joint_pos[n] = JointAngle_at_RCM_Left[n];
+	}
+	rcm_position[0][0] = DEFAULT_RCM_POS_X;
+	rcm_position[0][1] = DEFAULT_RCM_POS_Y;
+	rcm_position[0][2] = DEFAULT_RCM_POS_Z;
+	rcm_position[1][0] = DEFAULT_RCM_POS_X;
+	rcm_position[1][1] = -DEFAULT_RCM_POS_Y;
+	rcm_position[1][2] = DEFAULT_RCM_POS_Z;
+	virtualRCM_work_mode[0] = VIRTUAL_RCM_WORK_MODE_TELEOPERATION;
+	virtualRCM_work_mode[1] = VIRTUAL_RCM_WORK_MODE_TELEOPERATION;
+	p->pedal_on_off = 0;
+}
+
+void control_initialization()
+{
+	load_default_joint_position();
+}
+void control()
+{
+	RT_DATA *p = (RT_DATA*)m_pSharedData;
+	for (int id = 0; id < 2; id++)
+	{
+		//		transform_baiweibi(id);
+		forward_kinematics_calculation(id);
+		calculate_insertion_length(id, &tool_insertion_length[id]);
+
+		//if((p->pedal_command & PEDAL_COMMAND_ROBOT_ON) == 0)
+		if (p->pedal_on_off == 0)
+		{
+			p->jixieshou_data[id].ref_pos_x = p->jixieshou_data[id].act_pos_x;
+			p->jixieshou_data[id].ref_pos_y = p->jixieshou_data[id].act_pos_y;
+			p->jixieshou_data[id].ref_pos_z = p->jixieshou_data[id].act_pos_z;
+			p->jixieshou_data[id].ref_roll = p->jixieshou_data[id].act_roll;
+			p->jixieshou_data[id].ref_pitch = p->jixieshou_data[id].act_pitch;
+			p->jixieshou_data[id].ref_yaw = p->jixieshou_data[id].act_yaw;
+			p->jixieshou_data[id].ref_grasp = p->jixieshou_data[id].act_grasp;
+
+		}
+		else
+		{
+			double ref_pos[3];
+			double rcm_pos[3];
+			ref_pos[0] = p->jixieshou_data[id].ref_pos_x;
+			ref_pos[1] = p->jixieshou_data[id].ref_pos_y;
+			ref_pos[2] = p->jixieshou_data[id].ref_pos_z;
+
+			if (virtualRCM_work_mode[id] == VIRTUAL_RCM_WORK_MODE_TELEOPERATION)
+			{
+				rcm_pos[0] = rcm_position[id][0];
+				rcm_pos[1] = rcm_position[id][1];
+				rcm_pos[2] = rcm_position[id][2];
+				if (inverse_kinematics_calculation(id, ref_pos, rcm_pos))
+					invkin_copyto_ref_joint_limit(id);
+				if (tool_insertion_length[id] < 20.0)
+					virtualRCM_work_mode[id] = VIRTUAL_RCM_WORK_MODE_INSERTION_MOTION;
+
+			}
+			else if (virtualRCM_work_mode[id] == VIRTUAL_RCM_WORK_MODE_INSERTION_MOTION)
+			{
+				double Ttemp1[4][4] = { { 1, 0, 0, 0 }, { 0, 1, 0, 0 }, { 0, 0, 1, TOOL_MOUNT_DIST }, { 0, 0, 0, 1 } };//6dof to tool tip
+				double Ttemp[4][4];
+				MultiplyMatrix(fk_transform_global_frame[id], Ttemp1, Ttemp);
+				rcm_pos[0] = Ttemp[0][3];
+				rcm_pos[1] = Ttemp[1][3];
+				rcm_pos[2] = Ttemp[2][3];
+				if (inverse_kinematics_calculation(id, ref_pos, rcm_pos))
+					invkin_copyto_ref_joint_limit(id);
+				if (tool_insertion_length[id] >= 20.0)
+					virtualRCM_work_mode[id] = VIRTUAL_RCM_WORK_MODE_TELEOPERATION;
+			}
+			else // VIRTUAL_RCM_WORK_MODE_FREE_MOTION
+			{
+
+			}
+		}
+		button_input_ref_joint_limit(id);
+	}
+
+	for (int id = 0; id < 2; id++)
+	{
+		if (b_ur_connected[id] == TRUE)
+		{
+			UR5_control(id);
+
+		}
+		else
+			sim_joint_motion(id);
+	}
+
+	sim_instrument_control();
+}
+
+extern float com_ref_pos[3];
+
+void UDPData_to_SlaveData()
+{
+	RT_DATA *p=(RT_DATA*)m_pSharedData;	
+
+	//pedal commands
+	if((net_udp_command_packets.pedal_command & PEDAL_COMMAND_ROBOT_ON) == 0)
+		p->pedal_on_off = 0;
+	else
+		p->pedal_on_off = 1;
+	//delta data to absolute data
+	int arm_id = 0;
+	for(int master_id=0; master_id<2; master_id++)
+	{
+		if(master_id == 0)
+		{
+			arm_id = LEFT_TOOL_ARM_ID;
+		}
+		else if(master_id == 1)
+		{
+			arm_id = RIGHT_TOOL_ARM_ID;
+		}
+		//// if virtual rcm is not done, then no teleoperation
+		if(virtualRCM_work_mode[arm_id] != VIRTUAL_RCM_WORK_MODE_TELEOPERATION)
+			break;
+		////
+		p->jixieshou_data[arm_id].ref_pos_x += net_udp_command_packets.robot_x[master_id];
+		p->jixieshou_data[arm_id].ref_pos_y += net_udp_command_packets.robot_y[master_id];
+		p->jixieshou_data[arm_id].ref_pos_z += net_udp_command_packets.robot_z[master_id];
+		p->jixieshou_data[arm_id].ref_roll += net_udp_command_packets.tool_roll[master_id];
+		p->jixieshou_data[arm_id].ref_pitch += net_udp_command_packets.tool_pitch[master_id];
+		p->jixieshou_data[arm_id].ref_yaw += net_udp_command_packets.tool_yaw[master_id];
+		p->jixieshou_data[arm_id].ref_grasp = net_udp_command_packets.tool_grasp[master_id];
+		if (master_id == 1)
+		{
+			// 暂时只支持右臂
+			// yaw目前硬件不支持
+			// m1 <==> com_ref_pos[0] <==> pitch
+			// m2 <==> com_ref_pos[1] <==> grasp
+			// m3 <==> com_ref_pos[2] <==> roll 由执行臂控制,暂时不处理
+
+			// com_ref_pos[0]这里的值会变得和第一次相关，变化范围0-240
+			com_ref_pos[0] += 1.3 * net_udp_command_packets.tool_pitch[master_id];//incremental value
+			com_ref_pos[1] = net_udp_command_packets.tool_grasp[master_id];//absolute value from 0 to 100, 0-close 100-open
+			// com_ref_pos[1] 实测值为0-28, 但是m2的设计为超过<-100 顺时针旋转，>120左右逆时针才会运动,设置到3000左右夹子才能开合
+			com_ref_pos[1] = 5 * com_ref_pos[1];
+		}
+
+		//absolute value for instrument
+		p->jixieshou_data[arm_id].instrument_data.tool_type = net_udp_command_packets.instrument_type[master_id];
+		p->jixieshou_data[arm_id].instrument_data.ref_power_level = net_udp_command_packets.instrument_power_level[master_id];
+		p->jixieshou_data[arm_id].instrument_data.power_on_off = net_udp_command_packets.instrument_power_onoff[master_id];
+	}
+	//endo
+	arm_id = ENDO_ARM_ID;
+	p->jixieshou_data[arm_id].ref_pos_x += net_udp_command_packets.endo_x;
+	p->jixieshou_data[arm_id].ref_pos_y += net_udp_command_packets.endo_y;
+	p->jixieshou_data[arm_id].ref_pos_z += net_udp_command_packets.endo_z;
+	p->jixieshou_data[arm_id].ref_roll += net_udp_command_packets.endo_roll;
+
+}
+
+void SlaveData_to_UDPData()
+{
+	RT_DATA *p=(RT_DATA*)m_pSharedData;	
+	int arm_id = 0;
+	for(int master_id=0; master_id<2; master_id++)
+	{
+		if(master_id == 0)
+		{
+			arm_id = LEFT_TOOL_ARM_ID;
+		}
+		else if(master_id == 1)
+		{
+			arm_id = RIGHT_TOOL_ARM_ID;
+		}
+		//return actual data value
+		net_udp_return_packets.robot_x[master_id] = p->jixieshou_data[arm_id].act_pos_x;
+		net_udp_return_packets.robot_y[master_id] = p->jixieshou_data[arm_id].act_pos_y;
+		net_udp_return_packets.robot_z[master_id] = p->jixieshou_data[arm_id].act_pos_z;
+		net_udp_return_packets.tool_roll[master_id] = p->jixieshou_data[arm_id].act_roll;
+		net_udp_return_packets.tool_pitch[master_id] = p->jixieshou_data[arm_id].act_pitch;
+		net_udp_return_packets.tool_yaw[master_id] = p->jixieshou_data[arm_id].act_yaw;
+		net_udp_return_packets.tool_grasp[master_id] = p->jixieshou_data[arm_id].act_grasp;
+		net_udp_return_packets.instrument_type[master_id] = p->jixieshou_data[arm_id].instrument_data.tool_type;
+		net_udp_return_packets.instrument_status[master_id] = p->jixieshou_data[arm_id].instrument_data.tool_status;
+		net_udp_return_packets.instrument_power_level[master_id] = p->jixieshou_data[arm_id].instrument_data.act_power_level;
+	}
+
+	//endo
+	arm_id = ENDO_ARM_ID;
+	net_udp_return_packets.endo_x = p->jixieshou_data[arm_id].act_pos_x;
+	net_udp_return_packets.endo_y = p->jixieshou_data[arm_id].act_pos_y;
+	net_udp_return_packets.endo_z = p->jixieshou_data[arm_id].act_pos_z;
+	//other data
+	net_udp_return_packets.slave_packet_type = UDP_PACKET_TYPE_DATA;
+	net_udp_return_packets.slave_type = MASTER_TYPE_SIM_DEVICE;
+	net_udp_return_packets.errors = 0;
+	net_udp_return_packets.robot_status = 0;
+	net_udp_return_packets.endo_status = 0;
+
+
+
+}
